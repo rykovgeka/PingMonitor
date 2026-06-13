@@ -41,7 +41,7 @@ class DraggableTableWidget(QTableWidget):
 
 # === Settings ===
 CHECK_INTERVAL = 3
-FAILURE_THRESHOLD = 5  # сколько неудачных пингов подряд считать падением (по умолчанию)
+FAILURE_THRESHOLD = 5  # how many consecutive failed pings count as down (default)
 APP_VERSION = "1.0"
 GITHUB_URL = "https://github.com/rykovgeka/PingMonitor"
 if getattr(sys, 'frozen', False):
@@ -51,11 +51,11 @@ else:
     RESOURCE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR     = RESOURCE_DIR
 
-# Шаблоны (только для чтения из пакета)
+# Templates (read-only, bundled with the package)
 TEMPLATE_HOSTS   = os.path.join(RESOURCE_DIR, "hosts.json")
 TEMPLATE_SETTINGS= os.path.join(RESOURCE_DIR, "settings.ini")
 
-# Файлы, в которые мы читаем/пишем реальные данные
+# Files we actually read from / write to at runtime
 HOSTS_FILE    = os.path.join(DATA_DIR, "hosts.json")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.ini")
 
@@ -121,7 +121,7 @@ class EditHostDialog(QDialog):
             self.interval_edit.setText(str(host.interval))
 
     def get_data(self):
-        # Защищаемся от нечислового интервала, чтобы диалог не падал
+        # Guard against a non-numeric interval so the dialog doesn't crash
         try:
             interval = int(self.interval_edit.text())
             if interval < 1:
@@ -209,16 +209,16 @@ class PingWorker(QThread):
         try:
             system = platform.system().lower()
             if system == 'windows':
-                # -n 1 один пакет, -w 2000 таймаут ответа в мс
+                # -n 1 = one packet, -w 2000 = reply timeout in ms
                 cmd = ['ping', '-n', '1', '-w', '2000', self.address]
                 creationflags = subprocess.CREATE_NO_WINDOW
             else:
-                # На Linux/macOS -W это таймаут ответа в секундах (а не -w!)
+                # On Linux/macOS -W is the reply timeout in seconds (not -w!)
                 cmd = ['ping', '-c', '1', '-W', '2', self.address]
                 creationflags = 0
 
-            # Используем Popen, чтобы при выходе можно было убить именно
-            # процесс ping, а не грубо терминировать поток.
+            # Use Popen so that on exit we can kill the ping process
+            # itself instead of forcibly terminating the thread.
             self._proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -235,11 +235,11 @@ class PingWorker(QThread):
             output = (out or b'').decode('utf-8', errors='ignore').lower()
             output += (err or b'').decode('utf-8', errors='ignore').lower()
 
-            # ВАЖНО: на Windows ping возвращает код 0 даже при ответе
-            # "Destination host unreachable" от промежуточного роутера —
-            # поэтому одного returncode недостаточно (хост мигал бы).
-            # Настоящий echo-reply ВСЕГДА содержит "TTL=" (в любой локали
-            # Windows и в Linux как "ttl="), а ответы unreachable / timed out — нет.
+            # IMPORTANT: on Windows, ping returns code 0 even for a
+            # "Destination host unreachable" reply from an intermediate router,
+            # so the return code alone is not enough (the host would flicker).
+            # A real echo reply ALWAYS contains "TTL=" (in any Windows locale,
+            # and "ttl=" on Linux), while unreachable / timed-out replies don't.
             is_alive = (self._proc.returncode == 0 and 'ttl=' in output)
 
         except Exception:
@@ -249,7 +249,7 @@ class PingWorker(QThread):
             self.result_ready.emit(self.host, is_alive)
 
     def stop(self):
-        """Прервать проверку и убить процесс ping. Вызывается при выходе."""
+        """Abort the check and kill the ping process. Called on exit."""
         self._abort = True
         proc = self._proc
         if proc is not None and proc.poll() is None:
@@ -419,7 +419,7 @@ class PingMonitor(QMainWindow):
         threshold_action.triggered.connect(self.set_failure_threshold)
         settings_menu.addAction(threshold_action)
 
-        # Маленькая кнопка About в правом верхнем углу строки меню
+        # Small About button in the top-right corner of the menu bar
         about_btn = QPushButton("About")
         about_btn.setCursor(Qt.PointingHandCursor)
         about_btn.setFlat(True)
@@ -500,7 +500,7 @@ class PingMonitor(QMainWindow):
         self.notifications_enabled = self.settings.value("notifications", True, type=bool)
         self.start_minimized = self.settings.value("start_minimized", False, type=bool)
         threshold = self.settings.value("failure_threshold", FAILURE_THRESHOLD, type=int)
-        # Страхуемся от мусора в ini: порог должен быть не меньше 1
+        # Guard against junk in the ini: the threshold must be at least 1
         self.failure_threshold = threshold if threshold >= 1 else FAILURE_THRESHOLD
 
     def save_settings(self):
@@ -511,14 +511,14 @@ class PingMonitor(QMainWindow):
         self.settings.setValue("geometry", self.saveGeometry())
 
     def cleanup(self):
-        # Выполняется ровно один раз, чем бы ни был вызван выход:
-        # пунктом меню, кнопкой X окна или завершением сессии Windows
-        # (выключение / перезагрузка) через app.aboutToQuit.
+        # Runs exactly once, no matter how the exit was triggered:
+        # the menu item, the window's X button, or a Windows session end
+        # (shutdown / restart) via app.aboutToQuit.
         if self._cleaned_up:
             return
         self._cleaned_up = True
 
-        # Больше не планируем новые пинги
+        # Stop scheduling new pings
         try:
             self.timer.stop()
         except Exception:
@@ -527,9 +527,9 @@ class PingMonitor(QMainWindow):
         self.save_settings()
         self.save_hosts()
 
-        # Сначала убиваем процессы ping, чтобы потоки быстро завершились,
-        # потом ждём их. НЕ используем QThread.terminate() — это небезопасно
-        # и как раз и было причиной ошибок/падений при перезагрузке Windows.
+        # Kill the ping processes first so the threads finish quickly,
+        # then wait for them. We do NOT use QThread.terminate() — it is unsafe
+        # and was the cause of errors/crashes on Windows restart.
         for worker in list(self.ping_workers):
             try:
                 worker.stop()
@@ -538,7 +538,7 @@ class PingMonitor(QMainWindow):
         for worker in list(self.ping_workers):
             try:
                 if worker.isRunning():
-                    worker.wait(2000)  # ждём не более 2 секунд
+                    worker.wait(2000)  # wait at most 2 seconds
             except Exception:
                 pass
         self.ping_workers = []
@@ -581,7 +581,7 @@ class PingMonitor(QMainWindow):
 
     def set_failure_threshold(self):
         dlg = QInputDialog(self)
-        # Тёмная тема, чтобы диалог не выпадал из стиля приложения
+        # Dark theme so the dialog matches the rest of the app
         dlg.setStyleSheet("""
             QDialog { background-color: #1a2430; color: #ffffff; }
             QLabel { color: #cccccc; }
@@ -790,7 +790,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     monitor = PingMonitor()
-    # Гарантированная очистка при завершении сессии Windows (перезагрузка/выключение)
+    # Guaranteed cleanup on Windows session end (restart / shutdown)
     app.aboutToQuit.connect(monitor.cleanup)
 
     if not monitor.start_minimized:
